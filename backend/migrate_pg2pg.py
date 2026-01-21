@@ -43,6 +43,13 @@ from dotenv import load_dotenv
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+# 配置日志（必须在最前面，确保所有日志都能输出）
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True  # 强制重新配置，避免之前已配置的日志影响
+)
+
 # 加载 .env 文件（优先使用项目根目录，其次 backend 目录）
 backend_dir = Path(__file__).parent
 env_path = project_root / '.env'
@@ -53,12 +60,6 @@ if env_path.exists():
     logging.info(f"✅ 已加载 .env 文件: {env_path}")
 else:
     logging.warning(f"⚠️  未找到 .env 文件，将使用环境变量或默认值。查找路径: {project_root / '.env'}")
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 
 
 class PostgreSQLToPostgreSQLMigrator:

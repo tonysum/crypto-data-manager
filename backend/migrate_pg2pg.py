@@ -667,22 +667,22 @@ class PostgreSQLToPostgreSQLMigrator:
                 
                 # 构建 pg_restore 命令
                 # 注意：--clean 会先删除表，可能导致看起来没有新增表
-                # 如果目标数据库已有数据，建议不使用 --clean，或使用 --if-exists
+                # --if-exists 必须与 --clean 一起使用
                 restore_cmd = [
                     'pg_restore',
                     '-h', self.target_config['host'],
                     '-p', str(self.target_config['port']),
                     '-U', self.target_config['user'],
                     '-d', self.target_config['db'],
-                    '--if-exists',  # 如果对象不存在也不报错
                     '-v',  # 详细模式，输出更多信息
                     '--no-owner',  # 不设置对象所有者
                     '--no-privileges',  # 不设置权限
                     dump_path
                 ]
                 
-                # 只在目标数据库为空时使用 --clean
                 # 检查目标数据库是否已有表
+                # 如果为空，使用 --clean --if-exists（会先删除再创建）
+                # 如果已有表，直接导入（会追加数据，已存在的表会报错但继续）
                 try:
                     with self.target_engine.connect() as conn:
                         result = conn.execute(text("""
@@ -693,13 +693,17 @@ class PostgreSQLToPostgreSQLMigrator:
                         """))
                         table_count = result.fetchone()[0]
                         if table_count == 0:
-                            logging.info("目标数据库为空，将使用 --clean 选项")
-                            restore_cmd.insert(-1, '--clean')  # 在 dump_path 之前插入
+                            logging.info("目标数据库为空，将使用 --clean --if-exists 选项")
+                            # --if-exists 必须与 --clean 一起使用
+                            restore_cmd.insert(-1, '--clean')
+                            restore_cmd.insert(-1, '--if-exists')
                         else:
                             logging.info(f"目标数据库已有 {table_count} 个表，将追加数据（不使用 --clean）")
+                            logging.warning("⚠️  如果表已存在，pg_restore 可能会报错但会继续处理其他表")
                 except Exception as e:
-                    logging.warning(f"无法检查目标数据库表数量: {e}，将使用 --clean")
+                    logging.warning(f"无法检查目标数据库表数量: {e}，将使用 --clean --if-exists")
                     restore_cmd.insert(-1, '--clean')
+                    restore_cmd.insert(-1, '--if-exists')
                 
                 # 设置密码环境变量
                 if self.target_config['password']:

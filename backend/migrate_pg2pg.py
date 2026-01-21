@@ -649,7 +649,8 @@ class PostgreSQLToPostgreSQLMigrator:
                 process.wait()
                 if process.returncode != 0:
                     error_output = '\n'.join(output_lines)
-                    logging.error(f"pg_dump 输出（最后50行）:\n{'\n'.join(output_lines[-50:])}")
+                    last_lines = '\n'.join(output_lines[-50:])
+                    logging.error(f"pg_dump 输出（最后50行）:\n{last_lines}")
                     raise subprocess.CalledProcessError(process.returncode, dump_cmd, error_output)
                 
                 # 显示导出文件大小
@@ -749,7 +750,8 @@ class PostgreSQLToPostgreSQLMigrator:
                 process.wait()
                 if process.returncode != 0:
                     error_output = '\n'.join(output_lines)
-                    logging.error(f"pg_restore 输出（最后50行）:\n{'\n'.join(output_lines[-50:])}")
+                    last_lines = '\n'.join(output_lines[-50:])
+                    logging.error(f"pg_restore 输出（最后50行）:\n{last_lines}")
                     raise subprocess.CalledProcessError(process.returncode, restore_cmd, error_output)
                 
                 logging.info(f"✅ pg_restore 完成，共处理约 {table_count} 个表")

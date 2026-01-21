@@ -8,10 +8,11 @@ import KlineViewer from '@/components/KlineViewer'
 import SymbolListWithChart from '@/components/SymbolListWithChart'
 import DataIntegrityChecker from '@/components/DataIntegrityChecker'
 import IPInfo from '@/components/IPInfo'
+import DataMigration from '@/components/DataMigration'
 import { TopGainersProvider } from '@/contexts/TopGainersContext'
 
 export default function DataDashboard() {
-  const [activeTab, setActiveTab] = useState<'download' | 'delete' | 'edit' | 'kline' | 'list-chart' | 'integrity' | 'ip-info'>('download')
+  const [activeTab, setActiveTab] = useState<'download' | 'delete' | 'edit' | 'kline' | 'list-chart' | 'integrity' | 'ip-info' | 'migration'>('download')
 
   return (
     <TopGainersProvider>
@@ -98,6 +99,16 @@ export default function DataDashboard() {
             >
               IP地址信息
             </button>
+            <button
+              onClick={() => setActiveTab('migration')}
+              className={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${
+                activeTab === 'migration'
+                  ? 'text-orange-400 border-b-2 border-orange-400'
+                  : 'text-gray-400 hover:text-gray-300'
+              }`}
+            >
+              数据迁移
+            </button>
           </div>
 
           {/* 内容区域 */}
@@ -114,6 +125,7 @@ export default function DataDashboard() {
             {activeTab === 'list-chart' && <SymbolListWithChart />}
             {activeTab === 'integrity' && <DataIntegrityChecker />}
             {activeTab === 'ip-info' && <IPInfo />}
+            {activeTab === 'migration' && <DataMigration />}
           </div>
         </div>
       </main>

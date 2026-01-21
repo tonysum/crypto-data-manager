@@ -144,6 +144,10 @@ app = FastAPI(
             "name": "交易对管理",
             "description": "交易对管理和同步接口",
         },
+        {
+            "name": "数据迁移",
+            "description": "PostgreSQL 数据库迁移接口",
+        },
     ],
     lifespan=lifespan,  # 使用新的 lifespan 事件处理器
 )
@@ -1815,6 +1819,148 @@ async def health_check():
         "port": DATA_SERVICE_PORT,
         "docs": "/docs",
         "openapi": "/openapi.json"
+    }
+
+
+# ==================== 数据迁移相关 API ====================
+
+class MigrationRequest(BaseModel):
+    """数据迁移请求模型"""
+    target_host: str = Field(description="目标数据库主机地址")
+    target_port: int = Field(default=5432, description="目标数据库端口")
+    target_db: str = Field(default="crypto_data", description="目标数据库名")
+    target_user: str = Field(default="postgres", description="目标数据库用户名")
+    target_password: str = Field(description="目标数据库密码")
+    method: str = Field(default="dump", description="迁移方法：dump（推荐）或 python")
+    table_filter: Optional[str] = Field(default=None, description="表名过滤（如 K1d 表示只迁移K1d开头的表）")
+    tables: Optional[List[str]] = Field(default=None, description="指定要迁移的表名列表")
+    skip_existing: bool = Field(default=False, description="跳过已存在的数据（增量迁移）")
+    compare_only: bool = Field(default=False, description="只对比两个数据库的表数量，不执行迁移")
+
+
+class MigrationStatusResponse(BaseModel):
+    """迁移状态响应模型"""
+    status: str = Field(description="状态：running, completed, failed")
+    message: str = Field(description="状态消息")
+    progress: Optional[Dict] = Field(default=None, description="进度信息")
+
+
+# 存储迁移任务状态（实际应用中应使用 Redis 或数据库）
+migration_tasks: Dict[str, Dict] = {}
+
+
+@app.post("/api/migration/start", tags=["数据迁移"], response_model=MigrationStatusResponse)
+async def start_migration(request: MigrationRequest, background_tasks: BackgroundTasks):
+    """启动数据迁移任务"""
+    import uuid
+    from migrate_pg2pg import PostgreSQLToPostgreSQLMigrator
+    import os
+    
+    task_id = str(uuid.uuid4())
+    
+    # 从环境变量或请求中获取源数据库配置
+    source_host = os.getenv('PG_HOST', 'localhost')
+    source_port = int(os.getenv('PG_PORT', '5432'))
+    source_db = os.getenv('PG_DB', 'crypto_data')
+    source_user = os.getenv('PG_USER', 'postgres')
+    source_password = os.getenv('PG_PASSWORD', '')
+    
+    # 初始化任务状态
+    migration_tasks[task_id] = {
+        "status": "running",
+        "message": "迁移任务已启动",
+        "progress": None,
+        "start_time": datetime.now().isoformat()
+    }
+    
+    def run_migration():
+        """后台执行迁移任务"""
+        try:
+            migrator = PostgreSQLToPostgreSQLMigrator(
+                source_host=source_host,
+                source_port=source_port,
+                source_db=source_db,
+                source_user=source_user,
+                source_password=source_password,
+                target_host=request.target_host,
+                target_port=request.target_port,
+                target_db=request.target_db,
+                target_user=request.target_user,
+                target_password=request.target_password
+            )
+            
+            if request.compare_only:
+                # 只对比
+                comparison = migrator.compare_table_counts(request.table_filter)
+                migration_tasks[task_id]["status"] = "completed"
+                migration_tasks[task_id]["message"] = "对比完成"
+                migration_tasks[task_id]["progress"] = comparison
+            elif request.method == "dump":
+                # 使用 dump 方法
+                tables_to_migrate = None
+                if request.tables:
+                    tables_to_migrate = request.tables
+                elif request.table_filter:
+                    source_tables = migrator.get_source_tables()
+                    if request.table_filter.startswith('K'):
+                        tables_to_migrate = [t for t in source_tables if t.startswith(request.table_filter)]
+                    else:
+                        tables_to_migrate = [t for t in source_tables if request.table_filter in t]
+                
+                success = migrator.migrate_with_pg_dump(tables_to_migrate)
+                if success:
+                    migration_tasks[task_id]["status"] = "completed"
+                    migration_tasks[task_id]["message"] = "迁移完成"
+                else:
+                    migration_tasks[task_id]["status"] = "failed"
+                    migration_tasks[task_id]["message"] = "迁移失败"
+            else:
+                # 使用 Python 方法
+                stats = migrator.migrate_all(
+                    table_filter=request.table_filter,
+                    tables=request.tables,
+                    skip_existing=request.skip_existing
+                )
+                migration_tasks[task_id]["status"] = "completed"
+                migration_tasks[task_id]["message"] = f"迁移完成：成功 {stats['success']} 个表，失败 {stats['failed']} 个表"
+                migration_tasks[task_id]["progress"] = stats
+            
+            migration_tasks[task_id]["end_time"] = datetime.now().isoformat()
+        except Exception as e:
+            migration_tasks[task_id]["status"] = "failed"
+            migration_tasks[task_id]["message"] = f"迁移失败: {str(e)}"
+            migration_tasks[task_id]["end_time"] = datetime.now().isoformat()
+            logging.error(f"迁移任务失败: {e}", exc_info=True)
+    
+    # 在后台执行迁移
+    background_tasks.add_task(run_migration)
+    
+    return MigrationStatusResponse(
+        status="running",
+        message=f"迁移任务已启动，任务ID: {task_id}",
+        progress={"task_id": task_id}
+    )
+
+
+@app.get("/api/migration/status/{task_id}", tags=["数据迁移"], response_model=MigrationStatusResponse)
+async def get_migration_status(task_id: str):
+    """获取迁移任务状态"""
+    if task_id not in migration_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task = migration_tasks[task_id]
+    return MigrationStatusResponse(
+        status=task["status"],
+        message=task["message"],
+        progress=task.get("progress")
+    )
+
+
+@app.get("/api/migration/list", tags=["数据迁移"])
+async def list_migration_tasks():
+    """列出所有迁移任务"""
+    return {
+        "tasks": migration_tasks
     }
 
 

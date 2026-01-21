@@ -598,6 +598,7 @@ class PostgreSQLToPostgreSQLMigrator:
                     '-U', self.source_config['user'],
                     '-d', self.source_config['db'],
                     '-F', 'c',  # 自定义格式（压缩）
+                    '-v',  # 详细模式，输出更多信息
                     '-f', dump_path
                 ]
                 
@@ -613,28 +614,91 @@ class PostgreSQLToPostgreSQLMigrator:
                 
                 logging.info(f"正在导出数据到: {dump_path}")
                 logging.info(f"执行命令: {' '.join(dump_cmd)}")
+                logging.info("📦 开始导出数据（这可能需要一些时间，请耐心等待...）")
                 
-                result = subprocess.run(
+                # 实时显示 pg_dump 的输出
+                process = subprocess.Popen(
                     dump_cmd,
                     env=env,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    check=True
+                    bufsize=1
                 )
                 
-                logging.info("✅ 数据导出成功")
+                # 实时输出进度信息
+                output_lines = []
+                last_output_time = time.time()
+                line_count = 0
+                
+                for line in process.stdout:
+                    line = line.strip()
+                    if line:
+                        output_lines.append(line)
+                        line_count += 1
+                        last_output_time = time.time()
+                        # pg_dump 的输出通常是进度信息
+                        logging.info(f"  [{line_count}] {line}")
+                    else:
+                        # 如果超过30秒没有输出，显示心跳信息
+                        current_time = time.time()
+                        if current_time - last_output_time > 30:
+                            logging.info(f"  ⏳ pg_dump 仍在运行中...（已处理 {line_count} 行输出）")
+                            last_output_time = current_time
+                
+                process.wait()
+                if process.returncode != 0:
+                    error_output = '\n'.join(output_lines)
+                    logging.error(f"pg_dump 输出（最后50行）:\n{'\n'.join(output_lines[-50:])}")
+                    raise subprocess.CalledProcessError(process.returncode, dump_cmd, error_output)
+                
+                # 显示导出文件大小
+                if os.path.exists(dump_path):
+                    file_size = os.path.getsize(dump_path)
+                    size_mb = file_size / (1024 * 1024)
+                    if size_mb >= 1024:
+                        size_gb = size_mb / 1024
+                        logging.info(f"✅ 数据导出成功！导出文件大小: {size_gb:.2f} GB ({size_mb:.2f} MB)")
+                    else:
+                        logging.info(f"✅ 数据导出成功！导出文件大小: {size_mb:.2f} MB")
+                else:
+                    logging.info("✅ 数据导出成功")
                 
                 # 构建 pg_restore 命令
+                # 注意：--clean 会先删除表，可能导致看起来没有新增表
+                # 如果目标数据库已有数据，建议不使用 --clean，或使用 --if-exists
                 restore_cmd = [
                     'pg_restore',
                     '-h', self.target_config['host'],
                     '-p', str(self.target_config['port']),
                     '-U', self.target_config['user'],
                     '-d', self.target_config['db'],
-                    '--clean',  # 清理目标数据库中的对象
                     '--if-exists',  # 如果对象不存在也不报错
+                    '-v',  # 详细模式，输出更多信息
+                    '--no-owner',  # 不设置对象所有者
+                    '--no-privileges',  # 不设置权限
                     dump_path
                 ]
+                
+                # 只在目标数据库为空时使用 --clean
+                # 检查目标数据库是否已有表
+                try:
+                    with self.target_engine.connect() as conn:
+                        result = conn.execute(text("""
+                            SELECT COUNT(*) 
+                            FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_type = 'BASE TABLE'
+                        """))
+                        table_count = result.fetchone()[0]
+                        if table_count == 0:
+                            logging.info("目标数据库为空，将使用 --clean 选项")
+                            restore_cmd.insert(-1, '--clean')  # 在 dump_path 之前插入
+                        else:
+                            logging.info(f"目标数据库已有 {table_count} 个表，将追加数据（不使用 --clean）")
+                except Exception as e:
+                    logging.warning(f"无法检查目标数据库表数量: {e}，将使用 --clean")
+                    restore_cmd.insert(-1, '--clean')
                 
                 # 设置密码环境变量
                 if self.target_config['password']:
@@ -642,16 +706,55 @@ class PostgreSQLToPostgreSQLMigrator:
                 
                 logging.info(f"正在导入数据到目标数据库...")
                 logging.info(f"执行命令: {' '.join(restore_cmd)}")
+                logging.info("📥 开始导入数据（这可能需要一些时间，请耐心等待...）")
                 
-                result = subprocess.run(
+                # 实时显示 pg_restore 的输出
+                process = subprocess.Popen(
                     restore_cmd,
                     env=env,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    check=True
+                    bufsize=1
                 )
                 
-                logging.info("✅ 数据导入成功")
+                # 实时输出进度信息
+                output_lines = []
+                last_output_time = time.time()
+                line_count = 0
+                table_count = 0
+                
+                for line in process.stdout:
+                    line = line.strip()
+                    if line:
+                        output_lines.append(line)
+                        line_count += 1
+                        last_output_time = time.time()
+                        
+                        # 统计处理的表数量
+                        if 'processing data for table' in line.lower() or 'creating table' in line.lower():
+                            table_count += 1
+                            logging.info(f"  📊 [{table_count}] {line}")
+                        elif 'error' in line.lower() or 'failed' in line.lower():
+                            logging.error(f"  ❌ {line}")
+                        else:
+                            logging.info(f"  [{line_count}] {line}")
+                    else:
+                        # 如果超过30秒没有输出，显示心跳信息和进度
+                        current_time = time.time()
+                        if current_time - last_output_time > 30:
+                            logging.info(f"  ⏳ pg_restore 仍在运行中...（已处理 {line_count} 行输出，{table_count} 个表）")
+                            last_output_time = current_time
+                
+                process.wait()
+                if process.returncode != 0:
+                    error_output = '\n'.join(output_lines)
+                    logging.error(f"pg_restore 输出（最后50行）:\n{'\n'.join(output_lines[-50:])}")
+                    raise subprocess.CalledProcessError(process.returncode, restore_cmd, error_output)
+                
+                logging.info(f"✅ pg_restore 完成，共处理约 {table_count} 个表")
+                
+                logging.info("✅ 数据导入成功！")
                 return True
                 
             finally:

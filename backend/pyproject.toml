@@ -1,0 +1,36 @@
+[project]
+name = "crypto-data-manager-backend"
+version = "1.0.0"
+description = "加密货币数据管理后端服务"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.32.0",
+    "pandas==2.2.3",
+    "numpy==2.1.3",
+    "sqlalchemy==2.0.36",
+    "pydantic==2.10.3",
+    "python-binance==1.0.19",
+    "binance-sdk-derivatives-trading-usds-futures",
+    "python-dotenv==1.0.0",
+    "psycopg2-binary>=2.9.11",
+    "httpx==0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+# 配置 hatchling 构建工具
+[tool.hatch.build.targets.wheel]
+# 不打包任何文件，只安装依赖（因为这是一个应用而不是库）
+packages = []
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.uv.sources]
+# 如果需要从特定源安装包，可以在这里配置

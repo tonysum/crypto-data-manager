@@ -20,10 +20,17 @@ PG_USER = os.getenv("PG_USER", "postgres")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "")
 
 # 数据库连接URL
+# 对密码进行 URL 编码以处理特殊字符
+from urllib.parse import quote_plus
+
 if PG_PASSWORD:
-    DATABASE_URL = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+    encoded_password = quote_plus(PG_PASSWORD)
+    DATABASE_URL = f"postgresql://{PG_USER}:{encoded_password}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 else:
     DATABASE_URL = f"postgresql://{PG_USER}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+
+# SSL 模式配置（如果需要）
+PG_SSLMODE = os.getenv("PG_SSLMODE", "")  # 可选值: disable, allow, prefer, require, verify-ca, verify-full
 
 # 保持向后兼容（已废弃，使用 DATABASE_URL）
 DB_PATH = os.getenv("DB_PATH", str(project_root / "data" / "crypto_data.db"))

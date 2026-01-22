@@ -13,23 +13,33 @@ IN_EXCHANGE_SYMBOLS = in_exchange_trading_symbols()
 # 获取本地全部交易对数据
 def get_local_symbols(interval: str = "1d"):
     """获取本地数据库中指定时间间隔的交易对列表"""
-    # 表名格式: K{interval}{symbol}, 例如: K1dBTCUSDT
-    prefix = f'K{interval}'
-    stmt = """
-        SELECT table_name 
-        FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-        AND table_name LIKE :prefix
-    """
-    with engine.connect() as conn:
-        result = conn.execute(text(stmt), {"prefix": f"{prefix}%"})
-        table_names = result.fetchall()
-    # 去掉前缀 'K{interval}', 例如 'K1d' -> ''
-    prefix_len = len(prefix)
-    local_symbols = [name[0][prefix_len:] for name in table_names]
-    return local_symbols
+    try:
+        # 表名格式: K{interval}{symbol}, 例如: K1dBTCUSDT
+        prefix = f'K{interval}'
+        stmt = """
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name LIKE :prefix
+        """
+        with engine.connect() as conn:
+            result = conn.execute(text(stmt), {"prefix": f"{prefix}%"})
+            table_names = result.fetchall()
+        # 去掉前缀 'K{interval}', 例如 'K1d' -> ''
+        prefix_len = len(prefix)
+        local_symbols = [name[0][prefix_len:] for name in table_names]
+        return local_symbols
+    except Exception as e:
+        logging.warning(f"无法连接到数据库获取交易对列表: {e}")
+        logging.warning("将使用空列表，某些功能可能不可用")
+        return []
 
-LOCAL_SYMBOLS= get_local_symbols(interval="1d")  # 默认使用日线数据
+# 延迟初始化，避免启动时连接失败
+try:
+    LOCAL_SYMBOLS = get_local_symbols(interval="1d")  # 默认使用日线数据
+except Exception as e:
+    logging.warning(f"初始化本地交易对列表失败: {e}")
+    LOCAL_SYMBOLS = []
 
 #比较本地和交易所交易对，找出缺失的交易对
 def find_missing_symbols():

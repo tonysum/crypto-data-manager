@@ -20,6 +20,24 @@ except ImportError:
         DATABASE_URL = f"postgresql://{PG_USER}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
 # 创建 PostgreSQL 数据库引擎
+# 检查是否需要 SSL 连接
+connect_args = {
+    "connect_timeout": 10,  # 连接超时10秒
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 5
+}
+
+# 如果环境变量要求 SSL，添加 SSL 参数
+import os
+if os.getenv("PG_SSLMODE"):
+    connect_args["sslmode"] = os.getenv("PG_SSLMODE")
+elif "192.168" in DATABASE_URL or "localhost" not in DATABASE_URL.lower():
+    # 对于远程连接，尝试使用 prefer SSL 模式
+    # 如果服务器不支持 SSL，会自动降级到非 SSL
+    connect_args["sslmode"] = "prefer"
+
 engine = create_engine(
     DATABASE_URL,
     poolclass=QueuePool,
@@ -27,13 +45,7 @@ engine = create_engine(
     max_overflow=10,
     pool_pre_ping=True,  # 自动检测并重连断开的连接
     echo=False,
-    connect_args={
-        "connect_timeout": 10,  # 连接超时10秒
-        "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5
-    }
+    connect_args=connect_args
 )
 
 

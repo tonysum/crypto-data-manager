@@ -511,7 +511,9 @@ def kline2df(data) -> pd.DataFrame:
     df["pct_chg"] = (df["close"] - df["close"].shift(1)) / df["close"].shift(1) * 100
     
     # 时间戳转换为可读日期（毫秒级→秒级→datetime）
-    df["trade_date"] = pd.to_datetime(df["open_time"] // 1000, unit="s")
+    # 🔧 关键修复：显式指定 UTC，然后取消时区信息使其成为 naive datetime (本质仍是 UTC)
+    # 这可以避免 pandas 在转换过程中受到本地系统时区的影响
+    df["trade_date"] = pd.to_datetime(df["open_time"], unit="ms", utc=True).dt.tz_localize(None)
         
     return df
 

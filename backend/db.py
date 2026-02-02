@@ -84,17 +84,18 @@ def create_table(table_name):
                 volume DOUBLE PRECISION,
                 close_time BIGINT,
                 quote_volume DOUBLE PRECISION,
-                trade_count INTEGER,
+                trade_count BIGINT,
                 active_buy_volume DOUBLE PRECISION,
                 active_buy_quote_volume DOUBLE PRECISION,
                 reserved_field TEXT,
                 diff DOUBLE PRECISION,
                 pct_chg DOUBLE PRECISION
             );
+            CREATE INDEX IF NOT EXISTS "idx_{table_name}_open_time" ON "{table_name}" (open_time);
             """
             conn.execute(text(text_create))
             conn.commit()
-            logging.info(f"Table '{table_name}' created successfully.")
+            logging.info(f"Table '{table_name}' created successfully with open_time index.")
         return table_exists
     
 # 2. 删除表    

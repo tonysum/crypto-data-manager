@@ -1,20 +1,53 @@
 # PostgreSQL 连接问题修复指南
 
-## 错误信息
+## 错误信息 1: 权限验证失败
 
 ```
 FATAL: no pg_hba.conf entry for host "192.168.2.101", user "postgres", database "crypto_data", no encryption
 ```
 
+## 错误信息 2: 连接被拒绝 (Connection Refused)
+
+```
+connection to server at "192.168.2.250", port 5432 failed: Connection refused
+```
+
 ## 问题原因
 
-PostgreSQL 服务器的 `pg_hba.conf` 文件没有允许从你的 IP 地址（192.168.2.101）连接。
+1. **对于错误 1**: PostgreSQL 服务器的 `pg_hba.conf` 文件没有允许从您的 IP 地址连接。
+2. **对于错误 2**: 目标服务器上的 PostgreSQL 未运行，或者未配置为监听远程连接，或者防火墙拦截了端口。
 
 ## 解决方案
 
-### 方案 1：在 PostgreSQL 服务器上配置 pg_hba.conf（推荐）
+### 方案 1: 修复 "Connection Refused" (错误 2)
 
-1. **登录到 PostgreSQL 服务器**（192.168.2.200）
+**1. 检查 PostgreSQL 是否正在运行**：
+在目标服务器上运行：
+```bash
+sudo systemctl status postgresql
+```
+
+**2. 检查监听配置**：
+编辑 `postgresql.conf` 文件：
+```bash
+sudo nano /etc/postgresql/15/main/postgresql.conf
+# 或者
+sudo nano /var/lib/pgsql/15/data/postgresql.conf
+```
+搜索 `listen_addresses`，确保它被设置为 `'*'`：
+```conf
+listen_addresses = '*'          # 默认是 'localhost'，必须改为 '*' 才能接受远程连接
+```
+
+**3. 检查防火墙**：
+在目标服务器上允许 5432 端口：
+```bash
+sudo ufw allow 5432/tcp
+```
+
+### 方案 2：在 PostgreSQL 服务器上配置 pg_hba.conf (错误 1)
+
+1. **登录到 PostgreSQL 服务器**
 
 2. **编辑 pg_hba.conf 文件**：
    ```bash

@@ -39,6 +39,31 @@ from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from dotenv import load_dotenv
 
+def format_connection_error(e: Exception, host: str, port: int) -> str:
+    """格式化数据库连接错误，提供更详细的诊断建议"""
+    err_str = str(e)
+    if "Connection refused" in err_str:
+        return (
+            f"连接被拒绝 (Connection refused)。可能原因：\n"
+            f"1. 目标服务器 {host} 上的 PostgreSQL 未启动\n"
+            f"2. PostgreSQL 未配置为监听远程连接（检查 postgresql.conf 中的 listen_addresses）\n"
+            f"3. 目标服务器防火墙拦截了 {port} 端口\n"
+            f"原始错误: {err_str}"
+        )
+    elif "no pg_hba.conf entry" in err_str:
+        return (
+            f"权限验证失败 (no pg_hba.conf entry)。可能原因：\n"
+            f"目标服务器的 pg_hba.conf 未允许您的 IP 访问。请参考 POSTGRESQL_CONNECTION_FIX.md 进行修复。\n"
+            f"原始错误: {err_str}"
+        )
+    elif "password authentication failed" in err_str:
+        return f"密码验证失败，请检查用户名和密码是否正确。\n原始错误: {err_str}"
+    elif "timeout" in err_str.lower():
+        return f"连接超时。请检查网络连接或目标地址 {host} 是否正确。\n原始错误: {err_str}"
+    elif "does not exist" in err_str:
+        return f"数据库不存在。请确认目标数据库名是否正确。\n原始错误: {err_str}"
+    return f"连接失败: {err_str}"
+
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -134,7 +159,8 @@ class PostgreSQLToPostgreSQLMigrator:
                 conn.execute(text("SELECT 1"))
             logging.info(f"✅ 已连接源数据库: {source_host}:{source_port}/{source_db}")
         except Exception as e:
-            raise ConnectionError(f"无法连接到源数据库: {e}")
+            error_msg = format_connection_error(e, source_host, source_port)
+            raise ConnectionError(f"无法连接到源数据库: {error_msg}")
         
         # 连接目标数据库
         logging.info(f"正在连接目标数据库: {target_host}:{target_port}/{target_db}")
@@ -159,7 +185,8 @@ class PostgreSQLToPostgreSQLMigrator:
                 conn.execute(text("SELECT 1"))
             logging.info(f"✅ 已连接目标数据库: {target_host}:{target_port}/{target_db}")
         except Exception as e:
-            raise ConnectionError(f"无法连接到目标数据库: {e}")
+            error_msg = format_connection_error(e, target_host, target_port)
+            raise ConnectionError(f"无法连接到目标数据库: {error_msg}")
         
         # 保存连接信息（用于 pg_dump）
         self.source_config = {
@@ -209,7 +236,7 @@ class PostgreSQLToPostgreSQLMigrator:
             safe_table_name = f'"{table_name}"'
             with engine.connect() as conn:
                 result = conn.execute(text(f'SELECT COUNT(*) FROM {safe_table_name}'))
-                return result.fetchone()[0]
+                return result.scalar() or 0
         except Exception as e:
             logging.warning(f"获取表 {table_name} 行数失败: {e}")
             return 0
@@ -284,7 +311,7 @@ class PostgreSQLToPostgreSQLMigrator:
                     """),
                     {"table_name": table_name}
                 )
-                table_exists = result.fetchone()[0]
+                table_exists = result.scalar()
             
             if table_exists:
                 logging.info(f"表 {table_name} 已存在于目标数据库")
@@ -306,10 +333,10 @@ class PostgreSQLToPostgreSQLMigrator:
                 # 转换数据类型（如果需要）
                 if 'VARCHAR' in col_type or 'TEXT' in col_type:
                     pg_type = 'TEXT'
-                elif 'INTEGER' in col_type or 'INT' in col_type:
-                    pg_type = 'INTEGER'
                 elif 'BIGINT' in col_type:
                     pg_type = 'BIGINT'
+                elif 'INTEGER' in col_type or 'INT' in col_type:
+                    pg_type = 'INTEGER'
                 elif 'REAL' in col_type or 'FLOAT' in col_type or 'DOUBLE' in col_type:
                     pg_type = 'DOUBLE PRECISION'
                 elif 'BOOLEAN' in col_type:
@@ -344,7 +371,8 @@ class PostgreSQLToPostgreSQLMigrator:
     def migrate_table_data(
         self,
         table_name: str,
-        skip_existing: bool = False
+        skip_existing: bool = False,
+        skip_existing_tables: bool = False
     ) -> Dict:
         """迁移表数据"""
         safe_table_name = f'"{table_name}"'
@@ -362,7 +390,13 @@ class PostgreSQLToPostgreSQLMigrator:
                     """),
                     {"table_name": table_name}
                 )
-                if not result.fetchone()[0]:
+                table_exists = result.scalar()
+                
+                if table_exists and skip_existing_tables:
+                    logging.info(f"表 {table_name} 已存在，跳过迁移 (--skip-existing-tables)")
+                    return {'success': True, 'rows': 0, 'skipped': True}
+
+                if not table_exists:
                     # 先迁移表结构
                     if not self.migrate_table_schema(table_name):
                         return {'success': False, 'rows': 0, 'error': '无法创建表结构'}
@@ -375,23 +409,33 @@ class PostgreSQLToPostgreSQLMigrator:
             
             logging.info(f"开始迁移表 {table_name}，共 {source_rows} 行")
             
+            # 探测可用列，用于排序和主键检查
+            source_inspector = inspect(self.source_engine)
+            all_columns = [col['name'] for col in source_inspector.get_columns(table_name)]
+            
+            # 确定排序列（优先顺序：trade_date > open_time > id > 第一列）
+            sort_column = None
+            if 'trade_date' in all_columns:
+                sort_column = 'trade_date'
+            elif 'open_time' in all_columns:
+                sort_column = 'open_time'
+            elif 'id' in all_columns:
+                sort_column = 'id'
+            elif all_columns:
+                sort_column = all_columns[0]
+            
+            order_by_clause = f'ORDER BY "{sort_column}"' if sort_column else ''
+            
             # 如果跳过已存在的数据，先获取目标表中已存在的键
             existing_keys = set()
-            if skip_existing:
+            if skip_existing and sort_column:
                 try:
-                    # 假设主键是 trade_date（K线表）或 id（其他表）
                     with self.target_engine.connect() as conn:
-                        result = conn.execute(text(f'SELECT trade_date FROM {safe_table_name}'))
+                        result = conn.execute(text(f'SELECT "{sort_column}" FROM {safe_table_name}'))
                         existing_keys = {row[0] for row in result.fetchall()}
-                    logging.info(f"目标表中已有 {len(existing_keys)} 条记录")
-                except:
-                    # 如果没有 trade_date 列，尝试 id
-                    try:
-                        with self.target_engine.connect() as conn:
-                            result = conn.execute(text(f'SELECT id FROM {safe_table_name}'))
-                            existing_keys = {row[0] for row in result.fetchall()}
-                    except:
-                        pass
+                    logging.info(f"目标表中已有 {len(existing_keys)} 条记录 (基于 {sort_column} 检查)")
+                except Exception as e:
+                    logging.warning(f"获取目标表 {table_name} 已存在键失败: {e}")
             
             # 分批读取和插入数据
             migrated_rows = 0
@@ -407,7 +451,7 @@ class PostgreSQLToPostgreSQLMigrator:
                 for retry in range(max_retries + 1):
                     try:
                         with self.source_engine.connect() as conn:
-                            query = f'SELECT * FROM {safe_table_name} ORDER BY trade_date LIMIT {limit} OFFSET {offset}'
+                            query = f'SELECT * FROM {safe_table_name} {order_by_clause} LIMIT {limit} OFFSET {offset}'
                             df = pd.read_sql(query, conn)
                         break  # 成功读取，跳出重试循环
                     except (OperationalError, DisconnectionError) as e:
@@ -436,11 +480,9 @@ class PostgreSQLToPostgreSQLMigrator:
                     break
                 
                 # 过滤已存在的数据
-                if skip_existing and existing_keys:
-                    if 'trade_date' in df.columns:
-                        df = df[~df['trade_date'].isin(existing_keys)]
-                    elif 'id' in df.columns:
-                        df = df[~df['id'].isin(existing_keys)]
+                if skip_existing and existing_keys and sort_column:
+                    if sort_column in df.columns:
+                        df = df[~df[sort_column].isin(existing_keys)]
                 
                 if not df.empty:
                     # 插入到目标数据库（带重试）
@@ -457,11 +499,9 @@ class PostgreSQLToPostgreSQLMigrator:
                             migrated_rows += len(df)
                             
                             # 更新已存在的键集合
-                            if skip_existing:
-                                if 'trade_date' in df.columns:
-                                    existing_keys.update(df['trade_date'].tolist())
-                                elif 'id' in df.columns:
-                                    existing_keys.update(df['id'].tolist())
+                            if skip_existing and sort_column:
+                                if sort_column in df.columns:
+                                    existing_keys.update(df[sort_column].tolist())
                             break  # 成功插入，跳出重试循环
                         except (OperationalError, DisconnectionError) as e:
                             error_msg = str(e).lower()
@@ -523,7 +563,8 @@ class PostgreSQLToPostgreSQLMigrator:
         table_filter: Optional[str] = None,
         tables: Optional[List[str]] = None,
         table_file: Optional[str] = None,
-        skip_existing: bool = False
+        skip_existing: bool = False,
+        skip_existing_tables: bool = False
     ) -> Dict:
         """迁移所有表"""
         # 获取要迁移的表列表
@@ -553,12 +594,16 @@ class PostgreSQLToPostgreSQLMigrator:
         for i, table_name in enumerate(tables_to_migrate, 1):
             logging.info(f"\n[{i}/{len(tables_to_migrate)}] 迁移表: {table_name}")
             
-            result = self.migrate_table_data(table_name, skip_existing=skip_existing)
+            result = self.migrate_table_data(
+                table_name, 
+                skip_existing=skip_existing,
+                skip_existing_tables=skip_existing_tables
+            )
             
             if result['success']:
                 stats['success'] += 1
                 stats['total_rows'] += result['rows']
-                if result['rows'] == 0:
+                if result['rows'] == 0 or result.get('skipped'):
                     stats['skipped'] += 1
             else:
                 stats['failed'] += 1
@@ -584,6 +629,10 @@ class PostgreSQLToPostgreSQLMigrator:
         try:
             import tempfile
             
+            # 尝试获取环境变量中的路径，或者使用默认命令
+            pg_dump_bin = os.getenv('PG_DUMP_PATH', 'pg_dump')
+            pg_restore_bin = os.getenv('PG_RESTORE_PATH', 'pg_restore')
+            
             # 创建临时文件
             dump_file = tempfile.NamedTemporaryFile(mode='w+b', suffix='.sql', delete=False)
             dump_path = dump_file.name
@@ -592,7 +641,7 @@ class PostgreSQLToPostgreSQLMigrator:
             try:
                 # 构建 pg_dump 命令
                 dump_cmd = [
-                    'pg_dump',
+                    pg_dump_bin,
                     '-h', self.source_config['host'],
                     '-p', str(self.source_config['port']),
                     '-U', self.source_config['user'],
@@ -669,7 +718,7 @@ class PostgreSQLToPostgreSQLMigrator:
                 # 注意：--clean 会先删除表，可能导致看起来没有新增表
                 # --if-exists 必须与 --clean 一起使用
                 restore_cmd = [
-                    'pg_restore',
+                    pg_restore_bin,
                     '-h', self.target_config['host'],
                     '-p', str(self.target_config['port']),
                     '-U', self.target_config['user'],
@@ -691,7 +740,7 @@ class PostgreSQLToPostgreSQLMigrator:
                             WHERE table_schema = 'public' 
                             AND table_type = 'BASE TABLE'
                         """))
-                        table_count = result.fetchone()[0]
+                        table_count = result.scalar() or 0
                         if table_count == 0:
                             logging.info("目标数据库为空，将使用 --clean --if-exists 选项")
                             # --if-exists 必须与 --clean 一起使用
@@ -867,13 +916,23 @@ def main():
     parser.add_argument('--tables', nargs='+', help='指定要迁移的表名列表')
     parser.add_argument('--table-file', help='从文件读取要迁移的表名列表（每行一个）')
     parser.add_argument('--skip-existing', action='store_true',
-                       help='跳过目标数据库中已存在的数据（增量迁移）')
+                       help='跳过目标数据库中已存在的数据（增量迁移数据）')
+    parser.add_argument('--skip-existing-tables', action='store_true',
+                       help='如果目标数据库已存在该表，则完全跳过该表，不对其进行操作')
     parser.add_argument('--compare-only', action='store_true',
                        help='只对比两个数据库的表数量，不执行迁移')
     parser.add_argument('--batch-size', type=int, default=10000,
                        help='批量插入大小（仅用于python方法）')
+    parser.add_argument('--pg-dump-path', help='pg_dump 执行文件的路径（如不指定则从 PATH 查找）')
+    parser.add_argument('--pg-restore-path', help='pg_restore 执行文件的路径（如不指定则从 PATH 查找）')
     
     args = parser.parse_args()
+    
+    # 将路径保存到环境变量，以便 migrator 使用
+    if args.pg_dump_path:
+        os.environ['PG_DUMP_PATH'] = args.pg_dump_path
+    if args.pg_restore_path:
+        os.environ['PG_RESTORE_PATH'] = args.pg_restore_path
     
     # 配置优先级：命令行参数 > 环境变量（SOURCE_PG_*）> .env文件（PG_*）> 默认值
     # 源数据库（本地）：优先使用命令行参数，其次环境变量，最后 .env 文件中的 PG_* 配置
@@ -992,7 +1051,8 @@ def main():
             table_filter=args.table_filter,
             tables=tables_to_migrate,
             table_file=args.table_file,
-            skip_existing=args.skip_existing
+            skip_existing=args.skip_existing,
+            skip_existing_tables=args.skip_existing_tables
         )
         
         logging.info("=" * 80)

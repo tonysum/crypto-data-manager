@@ -16,19 +16,26 @@ def get_local_symbols(interval: str = "1d"):
     try:
         # 表名格式: K{interval}{symbol}, 例如: K1dBTCUSDT
         prefix = f'K{interval}'
+        # 使用 ILIKE 进行不区分大小写的匹配
         stmt = """
             SELECT table_name 
             FROM information_schema.tables 
             WHERE table_schema = 'public' 
-            AND table_name LIKE :prefix
+            AND table_name ILIKE :prefix
         """
         with engine.connect() as conn:
             result = conn.execute(text(stmt), {"prefix": f"{prefix}%"})
             table_names = result.fetchall()
-        # 去掉前缀 'K{interval}', 例如 'K1d' -> ''
-        prefix_len = len(prefix)
-        local_symbols = [name[0][prefix_len:] for name in table_names]
-        return local_symbols
+        
+        local_symbols = []
+        for name_row in table_names:
+            name = name_row[0]
+            # 找到前缀的位置（忽略大小写）
+            if name.lower().startswith(prefix.lower()):
+                symbol = name[len(prefix):]
+                local_symbols.append(symbol.upper())
+        
+        return list(set(local_symbols))  # 去重并返回
     except Exception as e:
         logging.warning(f"无法连接到数据库获取交易对列表: {e}")
         logging.warning("将使用空列表，某些功能可能不可用")
@@ -58,10 +65,14 @@ MISSING_SYMBOLS = find_missing_symbols()
 
 def get_local_kline_data(symbol: str, interval: str = "1d") -> pd.DataFrame:
     """获取本地数据库中指定交易对的K线数据"""
+    # 清洗输入
+    symbol = symbol.strip().upper()
+    interval = interval.strip()
     table_name = f'K{interval}{symbol}'
+    
     # PostgreSQL 表名需要用引号包裹（保持大小写）
     safe_table_name = f'"{table_name}"'
-    stmt = f'SELECT * FROM {safe_table_name} ORDER BY trade_date ASC'
+    stmt = f'SELECT * FROM {safe_table_name} ORDER BY open_time ASC'
     try:
         with engine.connect() as conn:
             result = conn.execute(text(stmt))
@@ -74,7 +85,7 @@ def get_local_kline_data(symbol: str, interval: str = "1d") -> pd.DataFrame:
         # 如果表不存在或其他数据库错误，返回空DataFrame
         # 不抛出异常，让调用者处理空数据的情况
         logging.warning(f"获取本地K线数据失败（表 {table_name} 可能不存在）: {e}")
-        # 尝试检查表是否存在（使用大小写不敏感的查询）
+        # 尝试检查表是否存在（改进：极度宽松查找）
         try:
             with engine.connect() as conn:
                 result = conn.execute(
@@ -82,17 +93,32 @@ def get_local_kline_data(symbol: str, interval: str = "1d") -> pd.DataFrame:
                         SELECT table_name 
                         FROM information_schema.tables 
                         WHERE table_schema = 'public' 
-                        AND (table_name = :table_name OR LOWER(table_name) = LOWER(:table_name))
+                        AND (
+                            table_name = :table_name 
+                            OR table_name = LOWER(:table_name)
+                            OR table_name = UPPER(:table_name)
+                            OR LOWER(table_name) = LOWER(:table_name)
+                        )
+                        LIMIT 1
                     """),
                     {"table_name": table_name}
                 )
-                actual_table_name = result.fetchone()
-                if actual_table_name:
-                    logging.info(f"发现表名大小写不匹配: 查询的是 {table_name}，实际表名是 {actual_table_name[0]}")
+                actual_table_name_row = result.fetchone()
+                
+                if not actual_table_name_row:
+                    # ILIKE 尝试回退
+                    result_fallback = conn.execute(
+                        text("SELECT table_name FROM information_schema.tables WHERE table_name ILIKE :table_name LIMIT 1"),
+                        {"table_name": table_name}
+                    )
+                    actual_table_name_row = result_fallback.fetchone()
+
+                if actual_table_name_row:
+                    actual_name = actual_table_name_row[0]
+                    logging.info(f"发现表名大小写不匹配或拼写相近: 查询的是 {table_name}，实际表名是 {actual_name}")
                     # 使用实际表名重试
-                    actual_name = actual_table_name[0]
                     safe_actual_name = f'"{actual_name}"'
-                    stmt_retry = f'SELECT * FROM {safe_actual_name} ORDER BY trade_date ASC'
+                    stmt_retry = f'SELECT * FROM {safe_actual_name} ORDER BY open_time ASC'
                     result_retry = conn.execute(text(stmt_retry))
                     data_retry = result_retry.fetchall()
                     columns_retry = result_retry.keys()
@@ -374,7 +400,8 @@ def delete_all_tables(confirm: bool = False) -> int:
         deleted_count = 0
         for table_name in table_names:
             try:
-                conn.execute(text(f"DROP TABLE IF EXISTS {table_name};"))
+                # 🔧 改进：使用引号包裹表名，处理大小写
+                conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}";'))
                 print(f"已删除表: {table_name}")
                 deleted_count += 1
             except Exception as e:
@@ -383,6 +410,57 @@ def delete_all_tables(confirm: bool = False) -> int:
         conn.commit()
         print(f"共删除 {deleted_count} 个表")
         return deleted_count
+
+
+def delete_table(table_name: str) -> bool:
+    """
+    通过表名直接删除数据库中的某个表（支持不区分大小写和前后空格）
+    """
+    if not table_name:
+        return False
+        
+    table_name = table_name.strip()
+    with engine.connect() as conn:
+        try:
+            # 🔧 改进：极其宽松的查找方式
+            stmt = """
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND (
+                    table_name = :table_name 
+                    OR table_name = LOWER(:table_name)
+                    OR table_name = UPPER(:table_name)
+                    OR LOWER(table_name) = LOWER(:table_name)
+                )
+                LIMIT 1
+            """
+            result = conn.execute(text(stmt), {"table_name": table_name})
+            actual_row = result.fetchone()
+            
+            if not actual_row:
+                # 最后的尝试：全库不区分大小写匹配
+                stmt_fallback = """
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_name ILIKE :table_name
+                    LIMIT 1
+                """
+                result = conn.execute(text(stmt_fallback), {"table_name": table_name})
+                actual_row = result.fetchone()
+
+            if not actual_row:
+                print(f"未找到匹配的表: {table_name}")
+                return False
+                
+            actual_table_name = actual_row[0]
+            conn.execute(text(f'DROP TABLE IF EXISTS "{actual_table_name}";'))
+            conn.commit()
+            print(f"已成功删除表: {actual_table_name} (原请求: {table_name})")
+            return True
+        except Exception as e:
+            print(f"删除表 {table_name} 失败: {e}")
+            return False
 
 
 def delete_kline_data(
@@ -408,46 +486,66 @@ def delete_kline_data(
     from datetime import datetime
     from sqlalchemy import text
     
+    # 清洗输入数据
+    symbol = symbol.strip().upper()
+    interval = interval.strip()
     table_name = f'K{interval}{symbol}'
     
-    # 检查表是否存在
+    # 检查表是否存在（改进：极度宽松的不区分大小写查找）
     with engine.connect() as conn:
-        result = conn.execute(
-            text("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = :table_name
-                );
-            """),
-            {"table_name": table_name}
-        )
-        table_exists = result.fetchone()[0]
+        stmt = """
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND (
+                table_name = :table_name 
+                OR table_name = LOWER(:table_name)
+                OR table_name = UPPER(:table_name)
+                OR LOWER(table_name) = LOWER(:table_name)
+            )
+            LIMIT 1
+        """
+        result = conn.execute(text(stmt), {"table_name": table_name})
+        table_row = result.fetchone()
         
-        if not table_exists:
+        # 最后的尝试：不区分大小写的 ILIKE 匹配
+        if not table_row:
+            stmt_fallback = """
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_name ILIKE :table_name
+                LIMIT 1
+            """
+            result = conn.execute(text(stmt_fallback), {"table_name": table_name})
+            table_row = result.fetchone()
+        
+        if not table_row:
             if verbose:
-                print(f"表 {table_name} 不存在")
+                print(f"表 {table_name} 不存在 (处理后名称)")
             return {
                 'success': False,
                 'message': f'表 {table_name} 不存在',
                 'deleted_count': 0
             }
         
+        # 使用数据库中实际的表名进行后续操作
+        actual_table_name = table_row[0]
+        
         # 如果没有指定时间范围，删除整个表
         if start_time is None and end_time is None:
-            conn.execute(text(f"DROP TABLE IF EXISTS {table_name};"))
+            conn.execute(text(f'DROP TABLE IF EXISTS "{actual_table_name}";'))
             conn.commit()
             if verbose:
-                print(f"已删除整个表: {table_name}")
+                print(f"已从数据库彻底删除表: {actual_table_name}")
             return {
                 'success': True,
-                'message': f'已删除整个表: {table_name}',
+                'message': f'已从数据库彻底删除表: {actual_table_name}',
                 'deleted_count': -1  # -1 表示删除整个表
             }
         
         # 删除指定时间范围内的数据
         # 先获取删除前的记录数
-        count_stmt = f"SELECT COUNT(*) FROM {table_name}"
+        count_stmt = f'SELECT COUNT(*) FROM "{actual_table_name}"'
         count_result = conn.execute(text(count_stmt))
         before_count = count_result.fetchone()[0]
         
@@ -495,7 +593,7 @@ def delete_kline_data(
             conditions.append(f"trade_date <= '{end_str}'")
         
         where_clause = " AND ".join(conditions)
-        delete_stmt = f"DELETE FROM {table_name} WHERE {where_clause}"
+        delete_stmt = f'DELETE FROM "{actual_table_name}" WHERE {where_clause}'
         
         try:
             conn.execute(text(delete_stmt))
@@ -507,11 +605,11 @@ def delete_kline_data(
             deleted_count = before_count - after_count
             
             if verbose:
-                print(f"已从表 {table_name} 删除 {deleted_count} 条记录")
+                print(f"已从表 {actual_table_name} 删除 {deleted_count} 条记录")
             
             return {
                 'success': True,
-                'message': f'已删除 {deleted_count} 条记录',
+                'message': f'已从表 {actual_table_name} 删除 {deleted_count} 条记录',
                 'deleted_count': deleted_count,
                 'before_count': before_count,
                 'after_count': after_count

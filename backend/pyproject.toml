@@ -29,8 +29,14 @@ dev = [
 # 不打包任何文件，只安装依赖（因为这是一个应用而不是库）
 packages = []
 
-[tool.uv]
-dev-dependencies = []
+# 开发依赖组（符合 PEP 735 标准）
+[dependency-groups]
+dev = [
+    # 开发依赖可以在这里添加，例如：
+    # "pytest>=7.0.0",
+    # "black>=23.0.0",
+    # "ruff>=0.1.0",
+]
 
 [tool.uv.sources]
 # 如果需要从特定源安装包，可以在这里配置

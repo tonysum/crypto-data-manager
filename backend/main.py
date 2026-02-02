@@ -45,6 +45,7 @@ from download_klines import (
 from data import (
     get_local_kline_data,
     delete_all_tables,
+    delete_table,
     delete_kline_data,
     check_data_integrity,
     generate_download_script_from_check,
@@ -124,6 +125,13 @@ app = FastAPI(
     openapi_url="/openapi.json",
     # 确保 OpenAPI schema 正确生成
     openapi_tags=[
+        {"name": "系统信息", "description": "系统信息和健康检查"},
+        {"name": "数据下载", "description": "K线数据下载相关接口"},
+        {"name": "数据查询", "description": "数据查询和检索接口"},
+        {"name": "数据管理", "description": "数据删除、修改等管理操作"},
+        {"name": "数据迁移", "description": "数据库迁移相关接口"},
+        {"name": "数据库统计", "description": "数据库统计信息"},
+        {"name": "其他数据下载", "description": "交易者数据、资金费率、Premium Index等数据下载"},
         {
             "name": "数据下载",
             "description": "K线数据下载相关接口",
@@ -141,6 +149,10 @@ app = FastAPI(
             "description": "系统信息和健康检查接口",
         },
         {
+            "name": "数据库统计",
+            "description": "数据库统计信息接口",
+        },
+        {
             "name": "交易对管理",
             "description": "交易对管理和同步接口",
         },
@@ -148,18 +160,49 @@ app = FastAPI(
             "name": "数据迁移",
             "description": "PostgreSQL 数据库迁移接口",
         },
+        {
+            "name": "其他数据下载",
+            "description": "交易者数据、资金费率、Premium Index等数据下载接口",
+        },
     ],
     lifespan=lifespan,  # 使用新的 lifespan 事件处理器
 )
 
 # 配置CORS中间件
+# 注意：CORSMiddleware 必须在其他中间件之前添加，它会自动处理 OPTIONS 预检请求
+# 重要：如果 allow_credentials=True，不能使用 allow_origins=["*"]，必须明确指定来源
+logging.info(f"CORS 允许的来源: {ALLOWED_ORIGINS}")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=ALLOWED_ORIGINS,  # 必须明确指定来源，不能使用 ["*"] 当 allow_credentials=True 时
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,  # 预检请求缓存时间（秒），减少预检请求次数
 )
+
+
+# 添加请求日志中间件（用于调试 CORS 问题）
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """记录所有请求，特别是 OPTIONS 请求"""
+    if request.method == "OPTIONS":
+        origin = request.headers.get("origin", "未提供")
+        logging.info(f"收到 OPTIONS 预检请求: {request.url.path}?{request.url.query}, Origin: {origin}")
+        # 检查 Origin 是否在允许列表中
+        if origin != "未提供" and origin not in ALLOWED_ORIGINS:
+            logging.warning(f"⚠️  Origin {origin} 不在允许列表中！允许的列表: {ALLOWED_ORIGINS}")
+    
+    response = await call_next(request)
+    
+    if request.method == "OPTIONS":
+        logging.info(f"OPTIONS 响应状态: {response.status_code}, Headers: {dict(response.headers)}")
+        # 如果返回 400，记录详细信息
+        if response.status_code == 400:
+            logging.error(f"❌ OPTIONS 请求被拒绝！Origin: {request.headers.get('origin')}, 允许的列表: {ALLOWED_ORIGINS}")
+    
+    return response
 
 
 class IntervalEnum(str, Enum):
@@ -218,6 +261,12 @@ class AutoUpdateRequest(BaseModel):
 
 class DeleteTablesRequest(BaseModel):
     """删除表请求模型"""
+    confirm: bool = Field(description="确认删除，必须为True才能执行删除操作")
+
+
+class DeleteTableByNameRequest(BaseModel):
+    """通过表名删除表请求模型"""
+    table_name: str = Field(description="要删除的表名")
     confirm: bool = Field(description="确认删除，必须为True才能执行删除操作")
 
 
@@ -952,6 +1001,26 @@ async def delete_tables(request: DeleteTablesRequest):
         }
     except Exception as e:
         logging.error(f"删除表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+@app.post("/api/table/delete-by-name", tags=["数据管理"])
+async def delete_table_by_name(request: DeleteTableByNameRequest):
+    """通过表名删除单个表"""
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="必须设置 confirm=true 才能执行删除操作")
+    
+    try:
+        success = delete_table(request.table_name)
+        if success:
+            return {
+                "status": "success",
+                "message": f"表 {request.table_name} 已成功删除"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"删除表 {request.table_name} 失败")
+    except Exception as e:
+        logging.error(f"删除表 {request.table_name} 失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
 
@@ -1822,6 +1891,170 @@ async def health_check():
     }
 
 
+@app.get("/api/database-stats", tags=["系统信息"])
+async def get_database_stats():
+    """获取数据库统计信息"""
+    try:
+        from db import engine
+        from sqlalchemy import text
+        
+        with engine.connect() as conn:
+            # 获取所有表名
+            result = conn.execute(text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_type = 'BASE TABLE'
+                AND table_name LIKE 'K%'
+                ORDER BY table_name
+            """))
+            all_tables = [row[0] for row in result.fetchall()]
+            
+            # 按 interval 分类统计
+            interval_stats = {}
+            total_tables = 0
+            total_rows = 0
+            
+            # 常见的 interval 前缀
+            intervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
+            
+            for interval in intervals:
+                prefix = f'K{interval}'
+                interval_tables = [t for t in all_tables if t.startswith(prefix)]
+                
+                if interval_tables:
+                    table_rows = []
+                    interval_total_rows = 0
+                    latest_dates = []  # 存储每个表的最新日期
+                    
+                    # 获取每个表的行数（限制查询数量，避免太慢）
+                    for table in interval_tables[:100]:  # 最多查询100个表
+                        try:
+                            safe_table_name = f'"{table}"'
+                            count_result = conn.execute(text(f'SELECT COUNT(*) FROM {safe_table_name}'))
+                            row_count = count_result.fetchone()[0]
+                            
+                            # 获取该表的最新日期
+                            latest_date = None
+                            try:
+                                date_result = conn.execute(text(f'SELECT MAX(trade_date) FROM {safe_table_name}'))
+                                latest_date_row = date_result.fetchone()
+                                if latest_date_row and latest_date_row[0]:
+                                    latest_date = str(latest_date_row[0])
+                                    latest_dates.append(latest_date)
+                            except Exception as e:
+                                logging.debug(f"获取表 {table} 最新日期失败: {e}")
+                            
+                            table_rows.append({
+                                'table_name': table,
+                                'row_count': row_count
+                            })
+                            interval_total_rows += row_count
+                        except Exception as e:
+                            logging.warning(f"获取表 {table} 行数失败: {e}")
+                            table_rows.append({
+                                'table_name': table,
+                                'row_count': 0
+                            })
+                    
+                    # 如果有超过100个表，估算剩余表的行数
+                    if len(interval_tables) > 100:
+                        # 计算平均行数
+                        if len(table_rows) > 0:
+                            avg_rows = interval_total_rows / len(table_rows)
+                            estimated_total = interval_total_rows + (len(interval_tables) - 100) * avg_rows
+                        else:
+                            estimated_total = interval_total_rows
+                    else:
+                        estimated_total = interval_total_rows
+                    
+                    # 计算所有表中最新的日期
+                    latest_date_overall = None
+                    if latest_dates:
+                        # 将日期字符串转换为datetime进行比较
+                        try:
+                            parsed_dates = []
+                            for date_str in latest_dates:
+                                if not date_str:
+                                    continue
+                                try:
+                                    # 处理PostgreSQL返回的datetime对象或字符串
+                                    if isinstance(date_str, datetime):
+                                        parsed_dates.append(date_str)
+                                    elif isinstance(date_str, str):
+                                        # 尝试解析不同的日期格式
+                                        if ' ' in date_str:
+                                            parsed_dates.append(datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S'))
+                                        else:
+                                            parsed_dates.append(datetime.strptime(date_str, '%Y-%m-%d'))
+                                except Exception as parse_err:
+                                    logging.debug(f"解析日期 {date_str} 失败: {parse_err}")
+                                    pass
+                            
+                            if parsed_dates:
+                                max_date = max(parsed_dates)
+                                # 格式化日期，如果有时间部分则显示完整时间，否则只显示日期
+                                if max_date.hour == 0 and max_date.minute == 0 and max_date.second == 0:
+                                    latest_date_overall = max_date.strftime('%Y-%m-%d')
+                                else:
+                                    latest_date_overall = max_date.strftime('%Y-%m-%d %H:%M:%S')
+                        except Exception as e:
+                            logging.debug(f"解析最新日期失败: {e}")
+                            # 如果解析失败，使用字符串比较（仅作为后备方案）
+                            if latest_dates:
+                                latest_date_overall = max([str(d) for d in latest_dates if d])
+                    
+                    interval_stats[interval] = {
+                        'table_count': len(interval_tables),
+                        'total_rows': int(estimated_total),
+                        'sampled_tables': len(table_rows),
+                        'latest_date': latest_date_overall,
+                        'tables': table_rows[:20]  # 只返回前20个表的详细信息
+                    }
+                    
+                    total_tables += len(interval_tables)
+                    total_rows += int(estimated_total)
+            
+            # 获取其他表（非K线表）
+            other_tables = [t for t in all_tables if not any(t.startswith(f'K{iv}') for iv in intervals)]
+            other_table_info = []
+            other_total_rows = 0
+            
+            for table in other_tables[:50]:  # 最多查询50个其他表
+                try:
+                    safe_table_name = f'"{table}"'
+                    count_result = conn.execute(text(f'SELECT COUNT(*) FROM {safe_table_name}'))
+                    row_count = count_result.fetchone()[0]
+                    other_table_info.append({
+                        'table_name': table,
+                        'row_count': row_count
+                    })
+                    other_total_rows += row_count
+                except Exception as e:
+                    logging.warning(f"获取表 {table} 行数失败: {e}")
+            
+            # 从 config 模块获取数据库信息
+            from config import PG_DB, PG_HOST
+            
+            return {
+                "total_tables": total_tables + len(other_tables),
+                "total_rows": total_rows + other_total_rows,
+                "kline_tables": total_tables,
+                "kline_rows": total_rows,
+                "by_interval": interval_stats,
+                "other_tables": {
+                    "count": len(other_tables),
+                    "total_rows": other_total_rows,
+                    "tables": other_table_info
+                },
+                "database_name": PG_DB,
+                "host": PG_HOST
+            }
+    except Exception as e:
+        logging.error(f"获取数据库统计信息失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+
+
 # ==================== 数据迁移相关 API ====================
 
 class MigrationRequest(BaseModel):
@@ -1834,12 +2067,31 @@ class MigrationRequest(BaseModel):
     method: str = Field(default="dump", description="迁移方法：dump（推荐）或 python")
     table_filter: Optional[str] = Field(default=None, description="表名过滤（如 K1d 表示只迁移K1d开头的表）")
     tables: Optional[List[str]] = Field(default=None, description="指定要迁移的表名列表")
-    skip_existing: bool = Field(default=False, description="跳过已存在的数据（增量迁移）")
+    skip_existing: bool = Field(default=False, description="跳过已存在的数据（增量迁移数据）")
+    skip_existing_tables: bool = Field(default=False, description="跳过已存在的表")
     compare_only: bool = Field(default=False, description="只对比两个数据库的表数量，不执行迁移")
+    pg_dump_path: Optional[str] = Field(default=None, description="pg_dump 执行路径")
+    pg_restore_path: Optional[str] = Field(default=None, description="pg_restore 执行路径")
+
+
+class ConnectionTestRequest(BaseModel):
+    """连接测试请求模型"""
+    host: str
+    port: int = 5432
+    db: str = "crypto_data"
+    user: str = "postgres"
+    password: str
+
+
+class ConnectionTestResponse(BaseModel):
+    """连接测试响应模型"""
+    success: bool
+    message: str
 
 
 class MigrationStatusResponse(BaseModel):
     """迁移状态响应模型"""
+    task_id: Optional[str] = Field(default=None, description="任务ID")
     status: str = Field(description="状态：running, completed, failed")
     message: str = Field(description="状态消息")
     progress: Optional[Dict] = Field(default=None, description="进度信息")
@@ -1847,6 +2099,38 @@ class MigrationStatusResponse(BaseModel):
 
 # 存储迁移任务状态（实际应用中应使用 Redis 或数据库）
 migration_tasks: Dict[str, Dict] = {}
+
+
+@app.post("/api/migration/test", tags=["数据迁移"], response_model=ConnectionTestResponse)
+async def test_migration_connection(request: ConnectionTestRequest):
+    """测试目标服务器数据库连接"""
+    from migrate_pg2pg import quote_plus, create_engine, text, format_connection_error
+    
+    try:
+        encoded_password = quote_plus(request.password)
+        url = f"postgresql://{request.user}:{encoded_password}@{request.host}:{request.port}/{request.db}"
+        
+        # 创建连接池（不维持长连接，测试完就关闭）
+        engine = create_engine(
+            url,
+            connect_args={
+                "connect_timeout": 5, # 短超时
+            }
+        )
+        
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            
+        return ConnectionTestResponse(
+            success=True,
+            message="✅ 连接成功！目标服务器已准备好接收迁移。"
+        )
+    except Exception as e:
+        error_msg = format_connection_error(e, request.host, request.port)
+        return ConnectionTestResponse(
+            success=False,
+            message=f"❌ 连接失败: {error_msg}"
+        )
 
 
 @app.post("/api/migration/start", tags=["数据迁移"], response_model=MigrationStatusResponse)
@@ -1876,6 +2160,12 @@ async def start_migration(request: MigrationRequest, background_tasks: Backgroun
     def run_migration():
         """后台执行迁移任务"""
         try:
+            # 设置 pg_dump/pg_restore 路径环境变量
+            if request.pg_dump_path:
+                os.environ['PG_DUMP_PATH'] = request.pg_dump_path
+            if request.pg_restore_path:
+                os.environ['PG_RESTORE_PATH'] = request.pg_restore_path
+
             migrator = PostgreSQLToPostgreSQLMigrator(
                 source_host=source_host,
                 source_port=source_port,
@@ -1919,7 +2209,8 @@ async def start_migration(request: MigrationRequest, background_tasks: Backgroun
                 stats = migrator.migrate_all(
                     table_filter=request.table_filter,
                     tables=request.tables,
-                    skip_existing=request.skip_existing
+                    skip_existing=request.skip_existing,
+                    skip_existing_tables=request.skip_existing_tables
                 )
                 migration_tasks[task_id]["status"] = "completed"
                 migration_tasks[task_id]["message"] = f"迁移完成：成功 {stats['success']} 个表，失败 {stats['failed']} 个表"
@@ -1936,6 +2227,7 @@ async def start_migration(request: MigrationRequest, background_tasks: Backgroun
     background_tasks.add_task(run_migration)
     
     return MigrationStatusResponse(
+        task_id=task_id,
         status="running",
         message=f"迁移任务已启动，任务ID: {task_id}",
         progress={"task_id": task_id}
@@ -1950,6 +2242,7 @@ async def get_migration_status(task_id: str):
     
     task = migration_tasks[task_id]
     return MigrationStatusResponse(
+        task_id=task_id,
         status=task["status"],
         message=task["message"],
         progress=task.get("progress")
@@ -1961,6 +2254,117 @@ async def list_migration_tasks():
     """列出所有迁移任务"""
     return {
         "tasks": migration_tasks
+    }
+
+
+# ==================== 其他数据下载相关 API ====================
+
+class OtherDataDownloadRequest(BaseModel):
+    """其他数据下载请求模型"""
+    download_trader: bool = Field(default=True, description="是否下载交易者数据")
+    download_funding: bool = Field(default=True, description="是否下载资金费率")
+    download_basis: bool = Field(default=True, description="是否下载基差数据")
+    download_premium: bool = Field(default=True, description="是否下载Premium Index")
+    run_once: bool = Field(default=True, description="是否只运行一次（False表示持续运行）")
+
+
+class OtherDataDownloadStatusResponse(BaseModel):
+    """其他数据下载状态响应模型"""
+    status: str = Field(description="状态：running, completed, failed")
+    message: str = Field(description="状态消息")
+    progress: Optional[Dict] = Field(default=None, description="进度信息")
+
+
+# 存储其他数据下载任务状态
+other_data_tasks: Dict[str, Dict] = {}
+
+
+@app.post("/api/other-data/start", tags=["其他数据下载"], response_model=OtherDataDownloadStatusResponse)
+async def start_other_data_download(request: OtherDataDownloadRequest, background_tasks: BackgroundTasks):
+    """启动其他数据下载任务"""
+    import uuid
+    from download_other import AutoDataDownloader
+    
+    task_id = str(uuid.uuid4())
+    
+    # 初始化任务状态
+    other_data_tasks[task_id] = {
+        "status": "running",
+        "message": "其他数据下载任务已启动",
+        "progress": {
+            "download_trader": request.download_trader,
+            "download_funding": request.download_funding,
+            "download_basis": request.download_basis,
+            "download_premium": request.download_premium,
+            "run_once": request.run_once,
+            "symbols_processed": 0,
+            "total_symbols": 0,
+            "trader_success": 0,
+            "funding_success": 0,
+            "basis_success": 0,
+            "premium_success": 0
+        },
+        "start_time": datetime.now().isoformat()
+    }
+    
+    def run_download():
+        """后台执行下载任务"""
+        try:
+            downloader = AutoDataDownloader(
+                download_trader=request.download_trader,
+                download_funding=request.download_funding,
+                download_basis=request.download_basis,
+                download_premium=request.download_premium
+            )
+            
+            if request.run_once:
+                # 只运行一次
+                downloader.run_once()
+                other_data_tasks[task_id]["status"] = "completed"
+                other_data_tasks[task_id]["message"] = "其他数据下载完成"
+            else:
+                # 持续运行（守护进程模式）
+                # 注意：这会一直运行，实际应用中可能需要更复杂的任务管理
+                downloader.run_daemon()
+                other_data_tasks[task_id]["status"] = "completed"
+                other_data_tasks[task_id]["message"] = "其他数据下载守护进程已启动"
+            
+            other_data_tasks[task_id]["end_time"] = datetime.now().isoformat()
+        except Exception as e:
+            other_data_tasks[task_id]["status"] = "failed"
+            other_data_tasks[task_id]["message"] = f"下载失败: {str(e)}"
+            other_data_tasks[task_id]["end_time"] = datetime.now().isoformat()
+            logging.error(f"其他数据下载任务失败: {e}", exc_info=True)
+    
+    # 在后台执行下载
+    background_tasks.add_task(run_download)
+    
+    return OtherDataDownloadStatusResponse(
+        status="running",
+        message=f"其他数据下载任务已启动，任务ID: {task_id}",
+        progress={"task_id": task_id}
+    )
+
+
+@app.get("/api/other-data/status/{task_id}", tags=["其他数据下载"], response_model=OtherDataDownloadStatusResponse)
+async def get_other_data_status(task_id: str):
+    """获取其他数据下载任务状态"""
+    if task_id not in other_data_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task = other_data_tasks[task_id]
+    return OtherDataDownloadStatusResponse(
+        status=task["status"],
+        message=task["message"],
+        progress=task.get("progress")
+    )
+
+
+@app.get("/api/other-data/list", tags=["其他数据下载"])
+async def list_other_data_tasks():
+    """列出所有其他数据下载任务"""
+    return {
+        "tasks": other_data_tasks
     }
 
 

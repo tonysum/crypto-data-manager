@@ -1,6 +1,30 @@
 # 快速开始指南
 
-## 🚀 快速启动
+## ⚡ 一键启动 (推荐)
+
+我们提供了一个脚本来一键启动前端和后端服务。
+
+```bash
+# 给予执行权限 (如果还没有)
+chmod +x scripts/*.sh
+
+# 运行启动脚本
+./scripts/start.sh
+```
+
+运行时你可以选择以下模式：
+- **Local Development**: 在本地物理机运行 (需要 Node.js 和 Python/uv)。
+- **Docker Compose**: 在 Docker 容器中运行 (需要 Docker)。
+
+你也可以直接带参数运行：
+```bash
+./scripts/start.sh --local   # 本地模式
+./scripts/start.sh --docker  # Docker 模式
+```
+
+---
+
+## 🚀 快速启动 (手动步骤)
 
 ### 1. 配置环境变量
 

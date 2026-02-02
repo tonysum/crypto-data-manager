@@ -9,10 +9,12 @@ import SymbolListWithChart from '@/components/SymbolListWithChart'
 import DataIntegrityChecker from '@/components/DataIntegrityChecker'
 import IPInfo from '@/components/IPInfo'
 import DataMigration from '@/components/DataMigration'
+import DatabaseStats from '@/components/DatabaseStats'
+import OtherDataDownload from '@/components/OtherDataDownload'
 import { TopGainersProvider } from '@/contexts/TopGainersContext'
 
 export default function DataDashboard() {
-  const [activeTab, setActiveTab] = useState<'download' | 'delete' | 'edit' | 'kline' | 'list-chart' | 'integrity' | 'ip-info' | 'migration'>('download')
+  const [activeTab, setActiveTab] = useState<'download' | 'delete' | 'edit' | 'kline' | 'list-chart' | 'integrity' | 'ip-info' | 'migration' | 'stats' | 'other-data'>('download')
 
   return (
     <TopGainersProvider>
@@ -109,23 +111,82 @@ export default function DataDashboard() {
             >
               数据迁移
             </button>
+            <button
+              onClick={() => setActiveTab('stats')}
+              className={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${
+                activeTab === 'stats'
+                  ? 'text-cyan-400 border-b-2 border-cyan-400'
+                  : 'text-gray-400 hover:text-gray-300'
+              }`}
+            >
+              数据库统计
+            </button>
+            <button
+              onClick={() => setActiveTab('other-data')}
+              className={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${
+                activeTab === 'other-data'
+                  ? 'text-indigo-400 border-b-2 border-indigo-400'
+                  : 'text-gray-400 hover:text-gray-300'
+              }`}
+            >
+              其他数据下载
+            </button>
           </div>
 
           {/* 内容区域 */}
-          <div 
-            className={`bg-gray-800/50 backdrop-blur-sm rounded-lg shadow-xl ${
-              activeTab === 'list-chart' ? 'p-4' : 'p-6'
-            }`}
-            style={activeTab === 'list-chart' ? { height: 'calc(100vh - 250px)', minHeight: '600px' } : {}}
-          >
-            {activeTab === 'download' && <DownloadForm />}
-            {activeTab === 'delete' && <DeleteForm />}
-            {activeTab === 'edit' && <EditDataForm />}
-            {activeTab === 'kline' && <KlineViewer />}
-            {activeTab === 'list-chart' && <SymbolListWithChart />}
-            {activeTab === 'integrity' && <DataIntegrityChecker />}
-            {activeTab === 'ip-info' && <IPInfo />}
-            {activeTab === 'migration' && <DataMigration />}
+          <div className="bg-gray-800/50 backdrop-blur-sm rounded-lg shadow-xl">
+            {/* 下载数据 */}
+            <div className={activeTab === 'download' ? 'p-6' : 'hidden'}>
+              <DownloadForm />
+            </div>
+            
+            {/* 删除数据 */}
+            <div className={activeTab === 'delete' ? 'p-6' : 'hidden'}>
+              <DeleteForm />
+            </div>
+            
+            {/* 修改数据 */}
+            <div className={activeTab === 'edit' ? 'p-6' : 'hidden'}>
+              <EditDataForm />
+            </div>
+            
+            {/* 查看K线 */}
+            <div className={activeTab === 'kline' ? 'p-6' : 'hidden'}>
+              <KlineViewer />
+            </div>
+            
+            {/* 列表与图表 */}
+            <div 
+              className={activeTab === 'list-chart' ? 'p-4' : 'hidden'}
+              style={activeTab === 'list-chart' ? { height: 'calc(100vh - 250px)', minHeight: '600px' } : {}}
+            >
+              <SymbolListWithChart />
+            </div>
+            
+            {/* 完整性检查 */}
+            <div className={activeTab === 'integrity' ? 'p-6' : 'hidden'}>
+              <DataIntegrityChecker />
+            </div>
+            
+            {/* IP地址信息 */}
+            <div className={activeTab === 'ip-info' ? 'p-6' : 'hidden'}>
+              <IPInfo />
+            </div>
+            
+            {/* 数据迁移 */}
+            <div className={activeTab === 'migration' ? 'p-6' : 'hidden'}>
+              <DataMigration />
+            </div>
+            
+            {/* 数据库统计 */}
+            <div className={activeTab === 'stats' ? 'p-6' : 'hidden'}>
+              <DatabaseStats />
+            </div>
+            
+            {/* 其他数据下载 */}
+            <div className={activeTab === 'other-data' ? 'p-6' : 'hidden'}>
+              <OtherDataDownload />
+            </div>
           </div>
         </div>
       </main>

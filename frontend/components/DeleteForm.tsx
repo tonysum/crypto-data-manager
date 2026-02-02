@@ -32,6 +32,7 @@ export default function DeleteForm() {
   })
   const [deleteLoading, setDeleteLoading] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [isDropTableMode, setIsDropTableMode] = useState(false)
   const [deleteMessage, setDeleteMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const handleDelete = async () => {
@@ -47,44 +48,73 @@ export default function DeleteForm() {
     setDeleteMessage(null)
 
     try {
-      const payload: any = {
-        symbol: deleteFormData.symbol.toUpperCase(),
-        interval: deleteFormData.interval,
-      }
+      if (isDropTableMode) {
+        // 彻底删除表模式
+        const tableName = `K${deleteFormData.interval}${deleteFormData.symbol.toUpperCase()}`
+        const response = await fetch(`${API_BASE_URL}/api/table/delete-by-name`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            table_name: tableName,
+            confirm: true
+          }),
+        })
 
-      // 如果提供了时间范围，添加到payload
-      if (deleteFormData.startTime) {
-        payload.start_time = deleteFormData.startTime
-      }
-      if (deleteFormData.endTime) {
-        payload.end_time = deleteFormData.endTime
-      }
-
-      const response = await fetch(`${API_BASE_URL}/api/kline-data`, {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      })
-
-      if (!response.ok) {
-        let errorDetail = '删除失败'
-        try {
+        if (!response.ok) {
           const errorData = await response.json()
-          errorDetail = errorData.detail || errorData.message || `HTTP ${response.status}`
-        } catch {
-          errorDetail = `HTTP ${response.status}: ${response.statusText}`
+          throw new Error(errorData.detail || '删除表失败')
         }
-        throw new Error(errorDetail)
-      }
 
-      const data = await response.json()
-      setDeleteMessage({
-        type: 'success',
-        text: data.message || `成功删除 ${data.deleted_count === -1 ? '整个表' : `${data.deleted_count} 条记录`}`,
-      })
+        const data = await response.json()
+        setDeleteMessage({
+          type: 'success',
+          text: data.message || `成功删除表 ${tableName}`,
+        })
+      } else {
+        // 仅删除数据模式
+        const payload: any = {
+          symbol: deleteFormData.symbol.toUpperCase(),
+          interval: deleteFormData.interval,
+        }
+
+        // 如果提供了时间范围，添加到payload
+        if (deleteFormData.startTime) {
+          payload.start_time = deleteFormData.startTime
+        }
+        if (deleteFormData.endTime) {
+          payload.end_time = deleteFormData.endTime
+        }
+
+        const response = await fetch(`${API_BASE_URL}/api/kline-data`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        })
+
+        if (!response.ok) {
+          let errorDetail = '删除失败'
+          try {
+            const errorData = await response.json()
+            errorDetail = errorData.detail || errorData.message || `HTTP ${response.status}`
+          } catch {
+            errorDetail = `HTTP ${response.status}: ${response.statusText}`
+          }
+          throw new Error(errorDetail)
+        }
+
+        const data = await response.json()
+        setDeleteMessage({
+          type: 'success',
+          text: data.message || `成功删除 ${data.deleted_count === -1 ? '整个表' : `${data.deleted_count} 条记录`}`,
+        })
+      }
+      
       setShowDeleteConfirm(false)
+      setIsDropTableMode(false)
       
       // 清空删除表单
       setDeleteFormData({
@@ -114,7 +144,7 @@ export default function DeleteForm() {
     }
   }
 
-  const handleDeleteClick = () => {
+  const handleDeleteClick = (mode: 'data' | 'table' = 'data') => {
     if (!deleteFormData.symbol) {
       setDeleteMessage({
         type: 'error',
@@ -122,20 +152,26 @@ export default function DeleteForm() {
       })
       return
     }
+    setIsDropTableMode(mode === 'table')
     setShowDeleteConfirm(true)
   }
 
   const getDeleteConfirmMessage = () => {
     const { symbol, interval, startTime, endTime } = deleteFormData
+    
+    if (isDropTableMode) {
+      return `【极度危险】你确定要“彻底删除”表 K${interval}${symbol} 吗？这将删除该交易对在此周期下的所有结构和数据，且不可恢复！`
+    }
+
     if (!startTime && !endTime) {
-      return `确定要删除交易对 ${symbol} 在 ${interval} 间隔下的所有数据吗？此操作不可恢复！`
+      return `确定要删除交易对 ${symbol} 在 ${interval} 间隔下的所有记录吗？`
     }
     const timeRange = startTime && endTime 
       ? `${startTime} 至 ${endTime}`
       : startTime 
       ? `从 ${startTime} 开始的所有数据`
       : `到 ${endTime} 为止的所有数据`
-    return `确定要删除交易对 ${symbol} 在 ${interval} 间隔下 ${timeRange} 的数据吗？此操作不可恢复！`
+    return `确定要删除交易对 ${symbol} 在 ${interval} 间隔下 ${timeRange} 的记录吗？`
   }
 
   return (
@@ -265,19 +301,34 @@ export default function DeleteForm() {
           </div>
         </div>
 
-        {/* 删除按钮 */}
-        <button
-          type="button"
-          onClick={handleDeleteClick}
-          disabled={deleteLoading || !deleteFormData.symbol}
-          className={`w-full py-3 px-6 rounded-lg font-medium transition-colors ${
-            deleteLoading || !deleteFormData.symbol
-              ? 'bg-gray-600 cursor-not-allowed'
-              : 'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800'
-          }`}
-        >
-          {deleteLoading ? '删除中...' : '删除数据'}
-        </button>
+        {/* 操作按钮区 */}
+        <div className="flex flex-col md:flex-row gap-4">
+          <button
+            type="button"
+            onClick={() => handleDeleteClick('data')}
+            disabled={deleteLoading || !deleteFormData.symbol}
+            className={`flex-1 py-3 px-6 rounded-lg font-medium transition-colors ${
+              deleteLoading || !deleteFormData.symbol
+                ? 'bg-gray-600 cursor-not-allowed'
+                : 'bg-red-600 hover:bg-red-700 text-white'
+            }`}
+          >
+            {deleteLoading && !isDropTableMode ? '处理中...' : '删除记录 (Delete Records)'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleDeleteClick('table')}
+            disabled={deleteLoading || !deleteFormData.symbol}
+            className={`flex-1 py-3 px-6 rounded-lg font-medium transition-colors border-2 ${
+              deleteLoading || !deleteFormData.symbol
+                ? 'border-gray-600 text-gray-500 cursor-not-allowed'
+                : 'border-red-500 text-red-500 hover:bg-red-500 hover:text-white'
+            }`}
+          >
+            {deleteLoading && isDropTableMode ? '删除中...' : '彻底删除表 (DROP TABLE)'}
+          </button>
+        </div>
       </div>
     </div>
   )

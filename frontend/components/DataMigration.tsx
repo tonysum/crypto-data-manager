@@ -24,13 +24,17 @@ export default function DataMigration() {
     method: 'dump',
     tableFilter: '',
     skipExisting: false,
+    skipExistingTables: false,
     compareOnly: false,
+    pgDumpPath: '',
+    pgRestorePath: '',
   })
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [currentTask, setCurrentTask] = useState<MigrationTask | null>(null)
   const [polling, setPolling] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [testLoading, setTestLoading] = useState(false)
 
   // 轮询任务状态
   useEffect(() => {
@@ -51,6 +55,14 @@ export default function DataMigration() {
               text: data.message
             })
           }
+        } else {
+          // 如果任务 ID 丢失或任务失败
+          setPolling(false)
+          setLoading(false)
+          setMessage({
+            type: 'error',
+            text: '任务状态获取异常（可能后端已重启或任务已丢失）'
+          })
         }
       } catch (error) {
         console.error('获取任务状态失败:', error)
@@ -59,6 +71,37 @@ export default function DataMigration() {
 
     return () => clearInterval(interval)
   }, [polling, currentTask?.task_id])
+
+  const handleTestConnection = async () => {
+    setTestLoading(true)
+    setMessage(null)
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/migration/test`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          host: formData.targetHost,
+          port: parseInt(formData.targetPort),
+          db: formData.targetDb,
+          user: formData.targetUser,
+          password: formData.targetPassword,
+        }),
+      })
+
+      const data = await response.json()
+      if (data.success) {
+        setMessage({ type: 'success', text: data.message })
+      } else {
+        setMessage({ type: 'error', text: data.message })
+      }
+    } catch (error: any) {
+      setMessage({ type: 'error', text: `测试连接失败: ${error.message}` })
+    } finally {
+      setTestLoading(false)
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -75,7 +118,10 @@ export default function DataMigration() {
         target_password: formData.targetPassword,
         method: formData.method,
         skip_existing: formData.skipExisting,
+        skip_existing_tables: formData.skipExistingTables,
         compare_only: formData.compareOnly,
+        pg_dump_path: formData.pgDumpPath || undefined,
+        pg_restore_path: formData.pgRestorePath || undefined,
       }
 
       if (formData.tableFilter) {
@@ -262,6 +308,32 @@ export default function DataMigration() {
             />
           </div>
 
+          {formData.method === 'dump' && (
+            <>
+              <div className="col-span-2">
+                <label className="block text-sm font-medium mb-1 text-gray-300">pg_dump 路径 (可选)</label>
+                <input
+                  type="text"
+                  value={formData.pgDumpPath}
+                  onChange={(e) => setFormData({ ...formData, pgDumpPath: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="例如: /opt/homebrew/bin/pg_dump (留空则使用系统默认)"
+                />
+              </div>
+
+              <div className="col-span-2">
+                <label className="block text-sm font-medium mb-1 text-gray-300">pg_restore 路径 (可选)</label>
+                <input
+                  type="text"
+                  value={formData.pgRestorePath}
+                  onChange={(e) => setFormData({ ...formData, pgRestorePath: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="例如: /opt/homebrew/bin/pg_restore (留空则使用系统默认)"
+                />
+              </div>
+            </>
+          )}
+
           <div className="col-span-2 space-y-2">
             <label className="flex items-center text-gray-300 cursor-pointer">
               <input
@@ -270,7 +342,17 @@ export default function DataMigration() {
                 onChange={(e) => setFormData({ ...formData, skipExisting: e.target.checked })}
                 className="mr-2 w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
               />
-              <span className="text-sm">跳过已存在的数据（增量迁移）</span>
+              <span className="text-sm">跳过已存在的数据（增量迁移数据）</span>
+            </label>
+
+            <label className="flex items-center text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={formData.skipExistingTables}
+                onChange={(e) => setFormData({ ...formData, skipExistingTables: e.target.checked })}
+                className="mr-2 w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+              />
+              <span className="text-sm">跳过已存在的表（不对比直接跳过）</span>
             </label>
 
             <label className="flex items-center text-gray-300 cursor-pointer">
@@ -286,7 +368,7 @@ export default function DataMigration() {
         </div>
 
         {message && (
-          <div className={`p-3 rounded-md ${
+          <div className={`p-3 rounded-md whitespace-pre-wrap ${
             message.type === 'success' 
               ? 'bg-green-900/50 text-green-300 border border-green-700' 
               : 'bg-red-900/50 text-red-300 border border-red-700'
@@ -303,18 +385,29 @@ export default function DataMigration() {
                 <span className="text-sm text-blue-400 animate-pulse">运行中...</span>
               )}
             </div>
-            <p className="text-sm text-gray-300">{currentTask.message}</p>
+            <p className="text-sm text-gray-300 whitespace-pre-wrap">{currentTask.message}</p>
             {renderProgress()}
           </div>
         )}
 
-        <button
-          type="submit"
-          disabled={loading || polling}
-          className="w-full py-3 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed font-medium transition-colors"
-        >
-          {loading || polling ? '处理中...' : '开始迁移'}
-        </button>
+        <div className="flex gap-4">
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={loading || polling || testLoading || !formData.targetHost || !formData.targetPassword}
+            className="flex-1 py-3 px-4 bg-gray-600 text-white rounded-md hover:bg-gray-700 disabled:bg-gray-800 disabled:cursor-not-allowed font-medium transition-colors"
+          >
+            {testLoading ? '测试中...' : '测试连接'}
+          </button>
+          
+          <button
+            type="submit"
+            disabled={loading || polling || testLoading}
+            className="flex-2 py-3 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed font-medium transition-colors"
+          >
+            {loading || polling ? '处理中...' : '开始迁移'}
+          </button>
+        </div>
       </form>
     </div>
   )

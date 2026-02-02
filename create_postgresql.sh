@@ -1,0 +1,2 @@
+docker run -d --name crypto_data_manager__postgres_server -p 5432:5432 -e POSTGRES_USER=crypto_user -e POSTGRES_PASSWORD=Crypto@891109 -e POSTGRES_DB=crypto_data -v pg_data:/var/lib/postgresql/data --restart always postgres:latest
+  

@@ -30,8 +30,10 @@ export default function KlineChart() {
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [warning, setWarning] = useState<string | null>(null)  // 用于显示警告信息（非错误）
   const [dataCount, setDataCount] = useState(0)
   const [autoLoaded, setAutoLoaded] = useState(false)
+  const MAX_DATA_LIMIT = 10000  // 最大数据条数限制
 
   // 初始化图表
   useEffect(() => {
@@ -202,12 +204,26 @@ export default function KlineChart() {
       }
 
       const result = await response.json()
-      const klineData: KlineData[] = result.data || []
+      let klineData: KlineData[] = result.data || []
+      const totalCount = result.total_count || klineData.length
 
       if (klineData.length === 0) {
         setError('没有找到数据')
         setDataCount(0)
         return
+      }
+
+      // 如果数据超过限制，只取最新的数据并显示警告
+      if (klineData.length > MAX_DATA_LIMIT) {
+        // 按时间排序，取最新的数据
+        klineData = klineData
+          .sort((a, b) => new Date(b.trade_date).getTime() - new Date(a.trade_date).getTime())
+          .slice(0, MAX_DATA_LIMIT)
+          .reverse()  // 反转回时间顺序（从旧到新）
+        
+        setWarning(`⚠️ 数据量较大（共 ${totalCount.toLocaleString()} 条），已限制显示最新的 ${MAX_DATA_LIMIT.toLocaleString()} 条数据`)
+      } else {
+        setWarning(null)  // 清除之前的警告
       }
 
       setDataCount(klineData.length)
@@ -226,6 +242,11 @@ export default function KlineChart() {
       // 调整图表以适应数据
       if (chartRef.current && candlestickData.length > 0) {
         chartRef.current.timeScale().fitContent()
+      }
+
+      // 如果数据被限制，显示提示信息
+      if (klineData.length >= MAX_DATA_LIMIT && totalCount > MAX_DATA_LIMIT) {
+        console.warn(`数据量超过限制（${totalCount} 条），已限制显示 ${MAX_DATA_LIMIT} 条`)
       }
     } catch (err: any) {
       console.error('获取K线数据错误:', err)
@@ -386,6 +407,11 @@ export default function KlineChart() {
       {error && (
         <div className="mb-4 p-4 bg-red-500/20 text-red-400 border border-red-500/50 rounded-lg">
           {error}
+        </div>
+      )}
+      {warning && (
+        <div className="mb-4 p-4 bg-yellow-500/20 text-yellow-400 border border-yellow-500/50 rounded-lg">
+          {warning}
         </div>
       )}
 
